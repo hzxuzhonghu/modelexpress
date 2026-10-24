@@ -187,11 +187,12 @@ ModelExpress/
 │       │   │       ├── __init__.py     # vLLM refit exports
 │       │   │       └── installer.py    # Mapped Direct Load installer
 │       │   └── sglang/                 # SGLang integration
-│       │       ├── __init__.py
+│       │       ├── __init__.py         # SGLang plugin registration and exports
 │       │       ├── adapter.py          # SglangAdapter; delegates cold reads to SGLang
 │       │       ├── checkpoint_selection.py # Role-specific shard filtering before reads
 │       │       ├── draft_weights.py    # Model-specific main/draft selection rules
 │       │       ├── loader.py           # MxModelLoader for remote_instance backend
+│       │       ├── patches/            # SGLang runtime patches (metadata prefetch)
 │       │       └── role_aware_streamer.py # Lazily imported SGLang shard-filtering loader
 │       ├── tensor_utils.py             # Tensor collection, checksums, storage views
 │       ├── transfer_safety.py          # Model feature detection for the P2P gate
@@ -1180,7 +1181,7 @@ Loading precedence: CLI args > environment variables > config file > defaults.
 | `model_snapshot.py` | Hugging Face cache layout: path validation, atomic snapshot publication, revision refs, metadata inventories |
 | `model_prefetch.py` | Pre-engine metadata prefetch and repo-id resolution for server-backed loading |
 | `engines/vllm/` | `VllmAdapter` and `MxModelLoader` map strategy hooks to vLLM loader APIs; `refit/` contains the separate vLLM-specific MDL installer |
-| `engines/sglang/` | `SglangAdapter` and `MxModelLoader` map strategy hooks to SGLang's `remote_instance` backend; `draft_weights.py` owns model-specific role rules and `checkpoint_selection.py` filters complete safetensors shards before ModelStreamer reads them |
+| `engines/sglang/` | `SglangAdapter` and `MxModelLoader` map strategy hooks to SGLang's `remote_instance` backend; `register_modelexpress_sglang` (registered under `sglang.srt.plugins`) installs runtime metadata-prefetch hooks; `draft_weights.py` owns model-specific role rules and `checkpoint_selection.py` filters complete safetensors shards before ModelStreamer reads them |
 | `tensor_utils.py` | Tensor collection, checksums, storage views, `capture_tensor_attrs` |
 | `rank_utils.py` | `get_global_rank`, `get_worker_rank` |
 | `vllm_worker.py` | `ModelExpressWorker` - compatibility worker class for older manual-registration workflows |
@@ -1603,7 +1604,7 @@ So the two halves are fetched separately:
 
 | Phase | What | When | Where |
 |---|---|---|---|
-| Metadata | Everything except weights | Before the engine resolves the model | `model_prefetch.ensure_metadata()`, invoked from a `snapshot_download` patch |
+| Metadata | Everything except weights | Before the engine resolves the model | `model_prefetch.ensure_metadata()`, invoked from engine startup patches (`snapshot_download`, SGLang resolution hooks, and `ModelConfig.__init__`) |
 | Weights | Weight files only | After `RdmaStrategy` finds no source | `ServerCacheStrategy` |
 
 Fetching metadata unconditionally does not weaken P2P-first, because no weight moves on that path — a live source still serves every byte of the weights.

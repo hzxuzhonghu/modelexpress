@@ -392,6 +392,12 @@ def build_sglang_source_identity(model_config: ModelConfig) -> p2p_pb2.SourceIde
 
 
 def _get_model_name(model_config: ModelConfig) -> str:
+    override = envs.MX_MODEL_NAME_OVERRIDE
+    if override:
+        return override
+    model_weights = getattr(model_config, "model_weights", None)
+    if isinstance(model_weights, str) and model_weights:
+        return model_weights
     return str(
         getattr(
             model_config,

@@ -113,11 +113,27 @@ class TestModelStreamerIsAvailable:
                 assert strategy.is_available(ctx) is True
 
     def test_unavailable_no_env(self):
-        ctx = _make_load_context()
+        model_config = SimpleNamespace(
+            model_weights=None,
+            model="deepseek-ai/DeepSeek-V3",
+            model_path=None,
+        )
+        ctx = _make_load_context(model_config=model_config)
         strategy = self._make_strategy()
         with patch.dict("os.environ", {}, clear=True):
             with patch("importlib.util.find_spec", return_value=MagicMock()):
                 assert strategy.is_available(ctx) is False
+
+    def test_available_with_model_weights_object_storage_uri_without_env(self):
+        model_config = SimpleNamespace(
+            model_weights="s3://bucket/deepseek-v3",
+            model_path="/tmp/sglang-cache/model_streamer/1234abcd",
+        )
+        ctx = _make_load_context(model_config=model_config)
+        strategy = self._make_strategy()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("importlib.util.find_spec", return_value=MagicMock()):
+                assert strategy.is_available(ctx) is True
 
     def test_unavailable_no_package(self):
         ctx = _make_load_context()

@@ -233,3 +233,269 @@ def test_humming_patch_skips_unknown_broken_version(monkeypatch):
     _install_fake_humming(monkeypatch, "0.26.0", HummingConfig)
 
     assert patch_humming_regex_ignore() is False
+
+
+def test_sglang_entrypoint_configures_logging_before_patches(monkeypatch):
+    from modelexpress.engines import sglang as sglang_integration
+
+    calls = []
+    monkeypatch.setattr(sglang_integration, "_sglang_registered", False)
+    monkeypatch.setattr(
+        sglang_integration,
+        "configure_sglang_logging",
+        lambda: calls.append(("logging", None)),
+    )
+    monkeypatch.setattr(
+        sglang_integration,
+        "apply_patches",
+        lambda patches: calls.append(("patches", patches)),
+    )
+
+    sglang_integration.register_modelexpress_sglang()
+    sglang_integration.register_modelexpress_sglang()
+
+    assert calls == [
+        ("logging", None),
+        ("patches", sglang_integration.SGLANG_PATCHES),
+    ]
+
+
+def _install_fake_sglang_modules(monkeypatch):
+    sglang_mod = ModuleType("sglang")
+    srt_mod = ModuleType("sglang.srt")
+    arg_groups_mod = ModuleType("sglang.srt.arg_groups")
+    resolution_hooks_mod = ModuleType("sglang.srt.arg_groups.resolution_hooks")
+    overrides_mod = ModuleType("sglang.srt.arg_groups.overrides")
+    configs_mod = ModuleType("sglang.srt.configs")
+    model_config_mod = ModuleType("sglang.srt.configs.model_config")
+
+    hooks: dict[str, list] = {}
+
+    def register_resolution_hook(step_name: str):
+        def decorator(fn):
+            hooks.setdefault(step_name, []).append(fn)
+            return fn
+
+        return decorator
+
+    def run_hook(step_fn, server_args):
+        chain = step_fn
+        for hook in hooks.get(step_fn.__name__, ()):
+            prev = chain
+            chain = lambda args, _h=hook, _p=prev: _h(args, _p)
+        return chain(server_args)
+
+    resolution_hooks_mod._HOOKS = hooks
+    resolution_hooks_mod.register_resolution_hook = register_resolution_hook
+    resolution_hooks_mod.run_hook = run_hook
+    overrides_mod.resolving_view = lambda server_args: server_args
+
+    init_calls = []
+
+    class ModelConfig:
+        def __init__(self, model_path: str, *args, revision=None, **kwargs):
+            init_calls.append((model_path, revision))
+            self.model_path = model_path
+            self.revision = revision
+
+    model_config_mod.ModelConfig = ModelConfig
+
+    for mod in (
+        sglang_mod,
+        srt_mod,
+        arg_groups_mod,
+        resolution_hooks_mod,
+        overrides_mod,
+        configs_mod,
+        model_config_mod,
+    ):
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+
+    return resolution_hooks_mod, ModelConfig, init_calls
+
+
+def test_sglang_metadata_prefetch_skips_when_disabled(monkeypatch):
+    from modelexpress import model_prefetch
+    from modelexpress.engines.sglang.patches.patch_sglang_metadata_prefetch import (
+        patch_sglang_metadata_prefetch,
+    )
+
+    monkeypatch.setattr(model_prefetch, "is_enabled", lambda: False)
+    resolution_hooks_mod, ModelConfig, _ = _install_fake_sglang_modules(monkeypatch)
+    original_init = ModelConfig.__init__
+
+    assert patch_sglang_metadata_prefetch() is False
+    assert resolution_hooks_mod._HOOKS == {}
+    assert ModelConfig.__init__ is original_init
+
+
+def test_sglang_metadata_prefetch_hooks_resolution_and_model_config(monkeypatch):
+    from modelexpress import model_prefetch
+    from modelexpress.engines.sglang.patches.patch_sglang_metadata_prefetch import (
+        patch_sglang_metadata_prefetch,
+    )
+
+    monkeypatch.setattr(model_prefetch, "is_enabled", lambda: True)
+    prefetched = []
+    monkeypatch.setattr(
+        model_prefetch,
+        "ensure_metadata",
+        lambda model, revision=None, *, cache_directory=None: prefetched.append(
+            (model, revision, cache_directory)
+        ),
+    )
+    resolution_hooks_mod, ModelConfig, init_calls = _install_fake_sglang_modules(
+        monkeypatch
+    )
+
+    assert patch_sglang_metadata_prefetch() is True
+    assert patch_sglang_metadata_prefetch() is False
+
+    step_order = []
+
+    def handle_model_source_paths(args):
+        step_order.append(("resolved", args.model_path))
+
+    server_args = SimpleNamespace(
+        model_path="org/model",
+        tokenizer_path=None,
+        speculative_draft_model_path="org/draft-model",
+        revision="main",
+        tokenizer_revision="tok-rev",
+        speculative_draft_model_revision=None,
+        download_dir="/tmp/hf-cache",
+    )
+    resolution_hooks_mod.run_hook(handle_model_source_paths, server_args)
+
+    assert step_order == [("resolved", "org/model")]
+    assert prefetched == [
+        ("org/model", "main", "/tmp/hf-cache"),
+        ("org/model", "tok-rev", "/tmp/hf-cache"),
+        ("org/draft-model", "main", "/tmp/hf-cache"),
+    ]
+
+    prefetched.clear()
+    cfg = ModelConfig("org/direct-model", revision="v1.0")
+    assert cfg.model_path == "org/direct-model"
+    assert init_calls == [("org/direct-model", "v1.0")]
+    assert prefetched == [("org/direct-model", "v1.0", None)]
+
+
+def test_sglang_metadata_prefetch_swallows_errors(monkeypatch):
+    from modelexpress import model_prefetch
+    from modelexpress.engines.sglang.patches.patch_sglang_metadata_prefetch import (
+        patch_sglang_metadata_prefetch,
+    )
+
+    monkeypatch.setattr(model_prefetch, "is_enabled", lambda: True)
+
+    def broken_ensure(*args, **kwargs):
+        raise RuntimeError("server unreachable")
+
+    monkeypatch.setattr(model_prefetch, "ensure_metadata", broken_ensure)
+    resolution_hooks_mod, ModelConfig, init_calls = _install_fake_sglang_modules(
+        monkeypatch
+    )
+
+    assert patch_sglang_metadata_prefetch() is True
+
+    server_args = SimpleNamespace(
+        model_path="org/model",
+        tokenizer_path=None,
+        speculative_draft_model_path=None,
+        revision=None,
+        tokenizer_revision=None,
+        speculative_draft_model_revision=None,
+        download_dir=None,
+    )
+    step_ran = []
+
+    def handle_model_source_paths(args):
+        step_ran.append(True)
+
+    resolution_hooks_mod.run_hook(handle_model_source_paths, server_args)
+    assert step_ran == [True]
+
+    ModelConfig("org/model", revision="main")
+    assert init_calls == [("org/model", "main")]
+
+
+def test_sglang_object_storage_patch_preserves_modelexpress_load_format(
+    monkeypatch,
+):
+    from modelexpress.engines.sglang.patches.patch_object_storage_format_check import (
+        patch_sglang_object_storage_format_check,
+    )
+
+    resolution_hooks_mod, _, _ = _install_fake_sglang_modules(monkeypatch)
+    overrides_mod = sys.modules["sglang.srt.arg_groups.overrides"]
+    declared_overrides = []
+
+    def declare_resolution(server_args, source, **fields):
+        declared_overrides.append((source, fields))
+        for key, value in fields.items():
+            setattr(server_args, key, value)
+
+    overrides_mod.declare_resolution = declare_resolution
+
+    assert patch_sglang_object_storage_format_check() is True
+    assert patch_sglang_object_storage_format_check() is False
+
+    def handle_load_format(args):
+        if str(args.model_path).startswith("s3://"):
+            declare_resolution(
+                args, "_handle_load_format", load_format="runai_streamer"
+            )
+        if getattr(args, "speculative_draft_model_path", None) and str(
+            args.speculative_draft_model_path
+        ).startswith("s3://"):
+            declare_resolution(
+                args,
+                "_handle_load_format",
+                speculative_draft_load_format="runai_streamer",
+            )
+
+    server_args = SimpleNamespace(
+        model_path="s3://bucket/deepseek-v3",
+        speculative_draft_model_path="s3://bucket/deepseek-v3-draft",
+        load_format="remote_instance",
+        remote_instance_weight_loader_backend="modelexpress",
+        speculative_draft_load_format=None,
+    )
+    resolution_hooks_mod.run_hook(handle_load_format, server_args)
+
+    assert server_args.load_format == "remote_instance"
+    assert server_args.speculative_draft_load_format is None
+    assert declared_overrides[-1] == (
+        "_modelexpress_object_storage_load_format",
+        {
+            "load_format": "remote_instance",
+            "speculative_draft_load_format": None,
+        },
+    )
+
+
+def test_sglang_object_storage_patch_ignores_non_modelexpress_load_format(
+    monkeypatch,
+):
+    from modelexpress.engines.sglang.patches.patch_object_storage_format_check import (
+        patch_sglang_object_storage_format_check,
+    )
+
+    resolution_hooks_mod, _, _ = _install_fake_sglang_modules(monkeypatch)
+
+    assert patch_sglang_object_storage_format_check() is True
+
+    def handle_load_format(args):
+        if str(args.model_path).startswith("s3://"):
+            args.load_format = "runai_streamer"
+
+    server_args = SimpleNamespace(
+        model_path="s3://bucket/deepseek-v3",
+        load_format="auto",
+        remote_instance_weight_loader_backend="nccl",
+        speculative_draft_load_format=None,
+    )
+    resolution_hooks_mod.run_hook(handle_load_format, server_args)
+
+    assert server_args.load_format == "runai_streamer"

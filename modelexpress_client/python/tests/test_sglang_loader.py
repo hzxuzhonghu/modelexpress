@@ -79,6 +79,21 @@ def test_sglang_adapter_builds_identity_from_sglang_configs():
     assert identity.revision == "abc123"
 
 
+def test_sglang_adapter_prefers_model_weights_and_name_override(monkeypatch):
+    model_config = _model_config(
+        model_path="/tmp/sglang-cache/model_streamer/1234abcd",
+        model_weights="s3://bucket/deepseek-ai/DeepSeek-V3",
+    )
+    adapter = SglangAdapter(_load_config(), model_config, _device_config())
+
+    identity = adapter.build_identity()
+    assert identity.model_name == "s3://bucket/deepseek-ai/DeepSeek-V3"
+
+    monkeypatch.setenv("MX_MODEL_NAME_OVERRIDE", "deepseek-ai/DeepSeek-V3")
+    identity_overridden = adapter.build_identity()
+    assert identity_overridden.model_name == "deepseek-ai/DeepSeek-V3"
+
+
 def test_sglang_context_uses_tp_rank_for_matching_and_url_override():
     ctx = build_sglang_load_context(
         _load_config(tp_rank=5, modelexpress_url="mx.example:9000"),

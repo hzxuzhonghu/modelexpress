@@ -24,6 +24,9 @@ from .context import LoadResult
 logger = logging.getLogger("modelexpress.strategy_model_streamer")
 
 
+_OBJECT_STORAGE_SCHEMES = ("s3://", "gs://", "az://")
+
+
 def _resolve_model_uri(ctx: LoadContext) -> str:
     """Resolve the model URI used by ModelStreamer across engine configs."""
     if model_uri := envs.MX_MODEL_URI:
@@ -35,12 +38,16 @@ def _resolve_model_uri(ctx: LoadContext) -> str:
     return ""
 
 
+def _is_object_storage_uri(uri: str) -> bool:
+    return str(uri).lower().startswith(_OBJECT_STORAGE_SCHEMES)
+
+
 class ModelStreamerStrategy(LoadStrategy):
     """Load weights by streaming safetensors via runai-model-streamer.
 
-    Activated by setting MX_MODEL_URI, which is also the preferred streaming
-    URI. Engine model configuration is used only when the environment value is
-    unavailable. Engine adapters provide the concrete ModelStreamer iterator.
+    Activated by setting MX_MODEL_URI or passing an object-storage URI
+    (s3://, gs://, az://) as the engine model path. Engine adapters provide
+    the concrete ModelStreamer iterator.
     """
 
     name = "model_streamer"
@@ -64,12 +71,15 @@ class ModelStreamerStrategy(LoadStrategy):
         if not self.supports_explicit_uri(ctx):
             return False
         model_uri = envs.MX_MODEL_URI or ""
-        if not model_uri:
-            logger.info(
-                f"[Worker {ctx.global_rank}] MX_MODEL_URI not set, skipping model streamer"
-            )
-            return False
-        return True
+        if model_uri:
+            return True
+        config_uri = _resolve_model_uri(ctx)
+        if _is_object_storage_uri(config_uri):
+            return True
+        logger.info(
+            f"[Worker {ctx.global_rank}] MX_MODEL_URI not set, skipping model streamer"
+        )
+        return False
 
     def load(self, result: LoadResult, ctx: LoadContext) -> LoadResult:
         model_uri = _resolve_model_uri(ctx)

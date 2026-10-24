@@ -105,7 +105,7 @@ class ServerCacheStrategy(LoadStrategy):
         target, not verified metadata. Missing snapshots and known or
         unreadable inventories still require strict metadata preparation.
         """
-        engine_path = getattr(ctx.model_config, "model", None)
+        engine_path = _engine_model_path(ctx)
         if engine_path:
             candidate = Path(str(engine_path))
             location = model_snapshot.snapshot_location(repo_id, candidate)
@@ -172,11 +172,18 @@ class ServerCacheStrategy(LoadStrategy):
             client.install_weight_files(repo_id, snapshot_path)
 
 
+def _engine_model_path(ctx: LoadContext) -> str | None:
+    """Return the model path configured on the engine's ModelConfig, if any."""
+    return getattr(ctx.model_config, "model", None) or getattr(
+        ctx.model_config, "model_path", None
+    )
+
+
 def _repo_id(ctx: LoadContext) -> str | None:
     """Resolve the repo id to ask the server for.
 
     Use the engine's model path because the MX identity may be a logical name.
     model_prefetch maps resolved cache paths back to their original repo ids.
     """
-    model = getattr(ctx.model_config, "model", None) or ctx.identity.model_name
+    model = _engine_model_path(ctx) or ctx.identity.model_name
     return model_prefetch.repo_id_for(model)

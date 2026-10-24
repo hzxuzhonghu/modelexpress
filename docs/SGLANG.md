@@ -120,11 +120,41 @@ handoff into ModelExpress:
 All other ModelExpress settings are environment variables, matching vLLM:
 `MX_METADATA_BACKEND`, `MX_MODEL_REVISION`, `MX_P2P_METADATA`,
 `MX_NIXL_BACKEND`, `MX_RDMA_NIC_PIN`, `MX_METADATA_PORT`,
-`MX_WORKER_GRPC_PORT`, and `MODEL_EXPRESS_LOG_LEVEL`.
+`MX_WORKER_GRPC_PORT`, `MODEL_EXPRESS_NO_SHARED_STORAGE`,
+`MODEL_EXPRESS_CACHE_DIRECTORY`, and `MODEL_EXPRESS_LOG_LEVEL`.
+
+### Server-backed metadata prefetch (no shared storage)
+
+When SGLang pods do not share a persistent Hugging Face cache or have no direct
+route to `huggingface.co`, set `MODEL_EXPRESS_NO_SHARED_STORAGE=1` alongside
+`MX_SERVER_ADDRESS` (or `MODEL_EXPRESS_URL`). ModelExpress registers an
+`sglang.srt.plugins` entry point (`modelexpress:register_modelexpress_sglang`)
+that SGLang loads automatically at process startup. Before SGLang resolves
+`ServerArgs` (`model_path`, `tokenizer_path`, `speculative_draft_model_path`)
+or constructs `ModelConfig`, ModelExpress streams the non-weight repository
+files (`config.json`, tokenizer files, chat templates, and custom modeling code)
+from ModelExpress Server into the local Hugging Face snapshot cache while
+keeping `model_path` as the original repository ID so P2P source identity
+matches across replicas. If no P2P source is ready when weight loading starts,
+`ServerCacheStrategy` streams the weight files from the server into the same
+snapshot directory before falling back to SGLang's native loader.
 
 ### Bootstrap with ModelStreamer
 
-Set `MX_MODEL_URI` to select ModelStreamer inside the same ModelExpress loader. Keep `--model-path` as the model identity and configuration source; passing the object-storage URI as `--model-path` bypasses the ModelExpress strategy chain.
+You can either pass an object-storage URI (`s3://`, `gs://`, `az://`) directly as `--model-path`, or keep `--model-path` as a Hugging Face repo ID and set `MX_MODEL_URI`. When `--model-path` is an object-storage URI, ModelExpress's SGLang plugin preserves `load_format="remote_instance"` (instead of letting SGLang overwrite it to `runai_streamer`) and activates `ModelStreamerStrategy` automatically on a P2P miss.
+
+```bash
+export MX_SERVER_ADDRESS=modelexpress-server:8001
+export MX_MS_DISTRIBUTED=1  # Enable for TP > 1
+
+python -m sglang.launch_server \
+  --model-path s3://my-bucket/path/to/model --tp 8 --port 30000 \
+  --load-format remote_instance \
+  --remote-instance-weight-loader-backend modelexpress \
+  --modelexpress-config '{"transport": "nixl"}'
+```
+
+Or with `--model-path` set to a Hugging Face repo ID and `MX_MODEL_URI` pointing to object storage or a local directory:
 
 ```bash
 export MX_SERVER_ADDRESS=modelexpress-server:8001

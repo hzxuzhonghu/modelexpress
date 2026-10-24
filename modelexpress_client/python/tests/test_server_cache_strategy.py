@@ -264,6 +264,40 @@ class TestLoad:
 
         assert FakeClient.instances[-1].calls == [(REPO, snapshot)]
 
+    def test_supports_sglang_model_config_model_path(
+        self, enabled, snapshot, fake_client
+    ):
+        """SGLang stores the model path on model_config.model_path rather than .model."""
+        from modelexpress.load_strategy import LoadContext
+
+        ctx = LoadContext(
+            model_config=SimpleNamespace(model_path=REPO, revision=COMMIT),
+            load_config=MagicMock(),
+            target_device=torch.device("cpu"),
+            global_rank=0,
+            worker_rank=0,
+            local_rank=0,
+            device_id=0,
+            identity=p2p_pb2.SourceIdentity(
+                model_name="org/logical-name", tensor_parallel_size=1
+            ),
+            mx_client=MagicMock(),
+            worker_id="test-worker",
+            adapter=_FakeAdapter(),
+        )
+
+        assert ServerCacheStrategy().is_available(ctx) is True
+        with patch.object(
+            model_prefetch, "ensure_metadata", return_value=snapshot
+        ) as ensure:
+            with patch(
+                "modelexpress.load_strategy.server_cache_strategy.register_tensors"
+            ):
+                ServerCacheStrategy().load(LoadResult(value=MagicMock()), ctx)
+
+        assert ensure.call_args.args == (REPO, COMMIT)
+        assert FakeClient.instances[-1].calls == [(REPO, snapshot)]
+
     def test_installs_metadata_when_no_snapshot_exists(self, enabled, snapshot, fake_client):
         ctx = _make_context(REPO, model_path=None)
 
